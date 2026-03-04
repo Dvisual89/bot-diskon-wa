@@ -9,80 +9,113 @@ const client = new Client({
 
 const sessionPencarian = {};
 
-/**
- * TAHAP 1: Fungsi Pencarian (VERSI PERBAIKAN EXACT MATCH)
- */
-function cariDiExcel(namaInput, khususStok = false) {
+function cariDiExcel(namaInput, khususStok = false, minStok = 0) {
     try {
-        const workbook = XLSX.readFile('./database.xlsx');
+        const path = require('path');
+        const fs = require('fs');
+        const filePath = path.resolve(__dirname, 'database.xlsx');
+        
+        // Membaca ulang file secara fisik dari disk (Bypass Cache)
+        const fileBuffer = fs.readFileSync(filePath);
+        const workbook = XLSX.read(fileBuffer, { type: 'buffer' });
+        
         const inputClean = namaInput.toLowerCase().trim();
-        const keywords = inputClean.replace(/\u00A0/g, ' ').split(/[\s,]+/).filter(k => k.length > 0);
+        const keywords = inputClean.split(/[\s,]+/).filter(k => k.length > 0);
 
         let hasilPencarian = [];
-        let listSheetTarget;
+        const semuaSheet = workbook.SheetNames;
+        const sheetStok = ["FREE STOCK MTO", "FREE STOCK MTS", "STOCK 2026"];
         
-        if (khususStok) {
-            listSheetTarget = ["FREE STOCK MTO", "FREE STOCK MTS", "STOCK 2026"];
-        } else {
-            const semuaSheet = workbook.SheetNames;
-            const listSheetStok = ["FREE STOCK MTO", "FREE STOCK MTS", "STOCK 2026"];
-            listSheetTarget = semuaSheet.filter(s => !listSheetStok.includes(s));
-        }
+        let mapStok = new Map();
+
+        // --- 1. PROSES DATA STOK DENGAN PEMBERSIHAN EKSTRA ---
+        sheetStok.forEach(sName => {
+            const sh = workbook.Sheets[sName];
+            if (!sh) return;
+            const data = XLSX.utils.sheet_to_json(sh, { header: 1, raw: true });
+            
+            data.forEach(row => {
+                // Bersihkan nama barang dari spasi ganda atau spasi di awal/akhir
+                const nama = String(row[0] || "").replace(/\s+/g, ' ').trim();
+                if (!nama) return;
+
+                // --- UBAH DI SINI: LOGIKA PEMILIHAN KOLOM ---
+                let qtyRaw;
+                if (sName === "STOCK 2026") {
+                    qtyRaw = row[6]; // Index 6 adalah Kolom G (A=0, B=1, ... G=6)
+                } else {
+                    qtyRaw = row[1]; // Index 1 adalah Kolom B (Default untuk MTO/MTS)
+                }
+                // --------------------------------------------
+
+                // Pastikan qty adalah angka murni
+                let qty = 0;
+                if (typeof qtyRaw === 'number') {
+                    qty = qtyRaw;
+                } else {
+                    qty = parseInt(String(qtyRaw || "0").replace(/[^0-9]/g, '')) || 0;
+                }
+                
+                if (!mapStok.has(nama)) {
+                    mapStok.set(nama, { mto: 0, mts: 0, s2026: 0 });
+                }
+                const current = mapStok.get(nama);
+                if (sName === "FREE STOCK MTO") current.mto += qty;
+                if (sName === "FREE STOCK MTS") current.mts += qty;
+                if (sName === "STOCK 2026") current.s2026 += qty;
+            });
+        });
+
+        // --- 2. CARI DI SHEET MASTER ---
+        const listSheetTarget = semuaSheet.filter(s => !sheetStok.includes(s));
 
         for (const sheetName of listSheetTarget) {
             const sheet = workbook.Sheets[sheetName];
-            if (!sheet) continue;
             const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: "" });
 
             for (let row of rows) {
-                const val0 = String(row[0] || "");
-                const val1 = String(row[1] || "");
-                const desc0 = val0.toLowerCase().trim();
-                const desc1 = val1.toLowerCase().trim();
-                const statusRaw = String(row[3] || "").toLowerCase();
-
-                if (statusRaw.includes("phase out")) continue;
-
-                // --- LOGIKA PERBAIKAN: CEK EXACT MATCH TERLEBIH DAHULU ---
-                if (desc0 === inputClean || desc1 === inputClean) {
-                    // Jika ditemukan yang persis sama, kosongkan hasil pencarian sebelumnya 
-                    // dan langsung kembalikan barang ini saja.
-                    const namaFix = desc1 === inputClean ? val1 : val0;
-                    return [{
-                        Nama: namaFix,
-                        Harga: typeof row[1] === 'number' ? row[1] : parseFloat(String(row[1] || 0).replace(/[^0-9]/g, '')),
-                        Leadtime: row[2] || '-',
-                        Status: row[3] ? String(row[3]) : '',
-                        StokMTO: 0, StokMTS: 0, Stok2026: 0
-                    }];
-                }
+                // Ambil Kolom A atau B sebagai Nama
+                const val0 = String(row[0] || "").replace(/\s+/g, ' ').trim();
+                const val1 = String(row[1] || "").replace(/\s+/g, ' ').trim();
                 
-                // Jika tidak exact, gunakan logika keyword seperti biasa
-                const isMatch = keywords.every(k => desc0.includes(k) || desc1.includes(k));
+                if (!val0 && !val1) continue;
 
-                if (isMatch) {
-                    const namaFix = desc1.length > desc0.length ? row[1] : row[0];
-                    if (!hasilPencarian.find(b => b.Nama === namaFix)) {
-                        hasilPencarian.push({
-                            Nama: namaFix,
-                            Harga: typeof row[1] === 'number' ? row[1] : parseFloat(String(row[1] || 0).replace(/[^0-9]/g, '')),
-                            Leadtime: row[2] || '-',
-                            Status: row[3] ? String(row[3]) : '',
-                            StokMTO: 0, StokMTS: 0, Stok2026: 0
-                        });
-                    }
+                const desc0 = val0.toLowerCase();
+                const desc1 = val1.toLowerCase();
+                
+                // Cek stok menggunakan Nama yang sudah dibersihkan
+                const dataStok = mapStok.get(val0) || mapStok.get(val1) || { mto: 0, mts: 0, s2026: 0 };
+                const totalStok = dataStok.mto + dataStok.mts + dataStok.s2026;
+
+                const isMatchNama = keywords.every(k => desc0.includes(k) || desc1.includes(k));
+                const isEnoughStok = totalStok >= minStok;
+
+                if (isMatchNama && isEnoughStok) {
+                    const namaFix = val1.length > val0.length ? val1 : val0;
+                    
+                    let hargaFinal = 0;
+                    if (typeof row[1] === 'number') hargaFinal = row[1];
+                    else hargaFinal = parseFloat(String(row[1]).replace(/[^0-9]/g, '')) || 0;
+
+                    hasilPencarian.push({
+                        Nama: namaFix,
+                        Harga: hargaFinal,
+                        Leadtime: String(row[2] || "-"),
+                        Status: String(row[3] || ""),
+                        StokMTO: dataStok.mto,
+                        StokMTS: dataStok.mts,
+                        Stok2026: dataStok.s2026,
+                        TotalStok: totalStok
+                    });
                 }
             }
         }
+        
+        const exact = hasilPencarian.find(b => b.Nama.toLowerCase().trim() === inputClean);
+        return exact ? [exact] : hasilPencarian;
 
-        // Penambahan logika di bagian akhir: Jika hasil pencarian mengandung satu item yang 
-        // namanya sangat mirip/identik dengan input, prioritaskan itu.
-        const exactMatchInList = hasilPencarian.find(b => b.Nama.toLowerCase().trim() === inputClean);
-        if (exactMatchInList) return [exactMatchInList];
-
-        return hasilPencarian;
     } catch (error) {
-        console.log('❌ Error:', error.message);
+        console.log('❌ Error Deep Reading:', error.message);
         return [];
     }
 }
@@ -153,6 +186,15 @@ client.on('message_create', async msg => {
         const apakahPerintah = isiPesan.startsWith('/');
         const adaDiList = sessionPencarian[chatID]?.data?.some(b => b.Nama.toLowerCase().includes(isiPesan));
         if (!apakahPerintah && !adaDiList) return;
+    }
+
+    if (isiPesan === '/refresh') {
+        try {
+            const stats = require('fs').statSync('./database.xlsx');
+            return await client.sendMessage(chatID, `✅ Database Terdeteksi.\nTerakhir Update: ${stats.mtime}`);
+        } catch (e) {
+            return await client.sendMessage(chatID, `❌ File tidak ditemukan!`);
+        }
     }
 
     // --- MENU UTAMA ---
@@ -237,20 +279,49 @@ Contoh: _/cek all BVP171 30%_
         }
     }
 
-    // --- FITUR 3: CEK STOCK ---
+    // --- FITUR 3: CEK STOCK (Update dengan Filter Qty) ---
     if (isiPesan.startsWith('/cek stock')) {
-        let namaCari = msg.body.substring(10).trim();
+        let rawInput = msg.body.substring(10).trim();
+        
+        // Regex untuk mencari angka + pcs (contoh: "dn 150pcs" atau "dn 150 pcs")
+        const qtyMatch = rawInput.match(/(\d+)\s*pcs/i);
+        let minQty = 0;
+        let namaCari = rawInput;
+
+        if (qtyMatch) {
+            minQty = parseInt(qtyMatch[1]);
+            namaCari = rawInput.replace(qtyMatch[0], "").trim(); // Hapus tulisan "150pcs" dari nama cari
+        }
+
         if (namaCari === "" && sessionPencarian[chatID]?.lastSelected) {
             namaCari = sessionPencarian[chatID].lastSelected;
         }
-        if (!namaCari) return await client.sendMessage(chatID, "❌ Sebutkan nama barang atau cari barang dulu.");
 
-        const hasil = cariDiExcel(namaCari, false); 
-        if (hasil.length === 0) return await client.sendMessage(chatID, `❌ Data stok untuk "${namaCari}" tidak ditemukan.`);
+        const hasil = cariDiExcel(namaCari, false, minQty); 
+
+        if (hasil.length === 0) {
+            const teksMin = minQty > 0 ? ` dengan stok ≥ ${minQty} unit` : "";
+            return await client.sendMessage(chatID, `❌ Barang "${namaCari}"${teksMin} tidak ditemukan.`);
+        }
+
+        // Jika hasil banyak, tampilkan daftar dengan info stok (Format Ringkas)
         if (hasil.length > 1) {
-            let listPesan = `📦 *Ditemukan beberapa tipe stok "${namaCari}":*\n\n`;
-            hasil.forEach((b, i) => { listPesan += `${i + 1}. ${b.Nama}\n`; });
+            let listPesan = `📦 *Ditemukan beberapa tipe (Min. ${minQty} pcs):*\n\n`;
+            
+            // Menampilkan hingga 50 item dalam format ringkas
+            const limit = 50;
+            const dataTampil = hasil.slice(0, limit);
+
+            dataTampil.forEach((b, i) => { 
+                listPesan += `${i + 1}. ${b.Nama} *(Stok: ${b.TotalStok})*\n`; 
+            });
+
+            if (hasil.length > limit) {
+                listPesan += `\n*...dan ${hasil.length - limit} tipe lainnya.*`;
+            }
+
             listPesan += `\n*Balas dengan nomor urut atau kata kunci spesifik.*`;
+            
             const msgList = await client.sendMessage(chatID, listPesan);
             sessionPencarian[chatID] = { ...sessionPencarian[chatID], fitur: 'stock', data: hasil, msgToDelete: msgList };
             return;
@@ -258,7 +329,6 @@ Contoh: _/cek all BVP171 30%_
 
         const barang = hasil[0];
         updateMemory(barang.Nama);
-        const totalStok = barang.StokMTO + barang.StokMTS + barang.Stok2026;
         const reply = `📦 *LAPORAN STOK TERPADU*
 ──────────────────
 🔍 *Produk:* ${barang.Nama}
@@ -268,10 +338,9 @@ Contoh: _/cek all BVP171 30%_
 • FREE STOCK MTS : *${barang.StokMTS}*
 • STOCK 2026     : *${barang.Stok2026}*
 
-📈 *TOTAL STOCK : ${totalStok} unit*
+📈 *TOTAL STOCK : ${barang.TotalStok} unit*
 🕒 *Leadtime:* ${barang.Leadtime}
-──────────────────
-_Data real-time dari sistem database._`;
+──────────────────`;
         return await client.sendMessage(chatID, reply, { quotedMessageId: msg.id._serialized });
     }
 
