@@ -80,14 +80,13 @@ client.on('ready', () => {
 });
 
 client.on('message_create', async msg => {
+    // 1. Ambil isi pesan dan ID Chat (Bisa ID Orang atau ID Grup)
     const isiPesan = msg.body.toLowerCase();
-    
-    // VARIABEL KUNCI: 
-    // Menggunakan msg.from agar bot membalas ke sumber pesan (grup atau japri)
-    const chatID = msg.from;
+    const chatID = msg.fromMe ? msg.to : msg.from;
 
-    // LOGIKA PENGAMAN:
-    // Supaya Anda bisa pakai sendiri, tapi bot tidak membalas chat biasa Anda
+    // 2. LOGIKA PENGAMAN:
+    // Jika pesan dari saya sendiri (fromMe), bot hanya merespons jika ada kata kunci.
+    // Jika pesan dari orang lain (di grup/japri), bot akan langsung merespons perintah.
     if (msg.fromMe) {
         const kataKunci = ['cek ', 'menu'];
         const apakahPerintah = kataKunci.some(k => isiPesan.startsWith(k));
@@ -112,7 +111,7 @@ client.on('message_create', async msg => {
                 const statusStok = totalStok > 0 ? `Ready Stock (${totalStok} unit)` : "Indent";
 
                 const reply = `*${barang.Nama}* harga nett *Rp ${formatRp(nettBulat)} / exc PPN*, Franco Semarang, TPP ${statusStok}.`;
-                return await client.sendMessage(chatID, reply);
+                return await client.sendMessage(chatID, reply, { quotedMessageId: msg.id._serialized });
             } else {
                 return await client.sendMessage(chatID, `❌ Barang "${namaCari}" tidak ditemukan atau sudah Phase Out.`);
             }
@@ -162,7 +161,7 @@ Contoh: _cek all BVP171 30%_
 🕒 *Leadtime:* ${barang.Leadtime}
 ──────────────────
 _Data real-time dari sistem database._`;
-            return await client.sendMessage(chatID, reply);
+            return await client.sendMessage(chatID, reply, { quotedMessageId: msg.id._serialized });
         } else {
             return await client.sendMessage(chatID, `❌ Data stok untuk "${namaCari}" tidak ditemukan.`);
         }
@@ -182,7 +181,7 @@ _Data real-time dari sistem database._`;
 🕒 *Leadtime:* ${barang.Leadtime} ${labelStatus}
 ──────────────────
 _Ketik "cek diskon [nama] [diskon]" untuk hitung nett._`;
-            return await client.sendMessage(chatID, reply);
+            return await client.sendMessage(chatID, reply, { quotedMessageId: msg.id._serialized });
         } else {
             return await client.sendMessage(chatID, `❌ Barang "${namaCari}" tidak ditemukan.`);
         }
@@ -210,7 +209,7 @@ _Ketik "cek diskon [nama] [diskon]" untuk hitung nett._`;
 ──────────────────
 💵 *HARGA NETT:* ${formatRp(nettOriginal)}
 ⚖️ *PEMBULATAN:* *${formatRp(nettBulat)}*`;
-                return await client.sendMessage(chatID, reply);
+                return await client.sendMessage(chatID, reply, { quotedMessageId: msg.id._serialized });
             } else {
                 return await client.sendMessage(chatID, `❌ Barang "${namaCari}" tidak ditemukan.`);
             }
