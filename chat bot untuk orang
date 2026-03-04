@@ -8,62 +8,72 @@ const client = new Client({
 });
 
 /**
- * TAHAP 1: Fungsi Pencarian (Sudah Mendukung Kolom D/Status)
- */
-function cariDiExcel(namaInput) {
+ * TAHAP 1: Fungsi Pencarian (Optimasi untuk Nama Barang Panjang & Karakter Khusus)
+ */
+function cariDiExcel(namaInput, khususStok = false) {
     try {
         const workbook = XLSX.readFile('./database.xlsx');
-        const keywords = namaInput.toLowerCase().split(' ').filter(k => k.length > 0);
- 
+        const keywords = namaInput.toLowerCase().replace(/\u00A0/g, ' ').split(/[\s,]+/).filter(k => k.length > 0);
+
         let dataProduk = null;
 
-        for (const sheetName of workbook.SheetNames) {
+        // Tentukan daftar sheet yang akan dicari berdasarkan kebutuhan
+        let listSheetTarget;
+        if (khususStok) {
+            // Jika dipanggil oleh 'cek stock', hanya cari di sheet stok
+            listSheetTarget = ["FREE STOCK MTO", "FREE STOCK MTS", "STOCK 2026"];
+        } else {
+            // Jika 'cek harga/all', cari di sheet pricelist (kecuali sheet stok)
+            const semuaSheet = workbook.SheetNames;
             const listSheetStok = ["FREE STOCK MTO", "FREE STOCK MTS", "STOCK 2026"];
-            if (listSheetStok.includes(sheetName)) continue;
-
-            const sheet = workbook.Sheets[sheetName];
-            const rows = XLSX.utils.sheet_to_json(sheet, { header: 1 });
-
-            for (let row of rows) {
-                if (!row || !row[0]) continue;
-                const deskripsi = String(row[0]).toLowerCase();
-
-                if (keywords.every(k => deskripsi.includes(k))) {
-                    const statusRaw = row[3] ? String(row[3]).toLowerCase() : '';
-                    const isPhaseOut = statusRaw.includes("phase");
-
-                    dataProduk = {
-                        Nama: row[0],
-                        Harga: typeof row[1] === 'number' ? row[1] : parseFloat(String(row[1] || 0).replace(/[^0-9]/g, '')),
-                        Leadtime: row[2] || '-',
-                        Status: statusRaw,
-                        IsPhaseOut: isPhaseOut, // Flag penanda Phase Out
-                        StokMTO: 0,
-                        StokMTS: 0,
-                        Stok2026: 0
-                    };
-
-                    // Jika barang aktif (bukan phase out), langsung ambil ini.
-                    // Jika phase out, kita simpan dulu tapi tetap lanjut cari baris lain (siapa tahu ada baris pengganti yang aktif)
-                    if (!isPhaseOut) break; 
-                }
-            }
-            if (dataProduk && !dataProduk.IsPhaseOut) break; 
+            listSheetTarget = semuaSheet.filter(s => !listSheetStok.includes(s));
         }
 
-        if (dataProduk && !dataProduk.IsPhaseOut) {
+        for (const sheetName of listSheetTarget) {
+            const sheet = workbook.Sheets[sheetName];
+            if (!sheet) continue;
+            const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: "" });
+
+            for (let row of rows) {
+                // Cek kolom 0 atau 1 (karena letak nama barang bisa berbeda tiap sheet)
+                const desc0 = String(row[0] || "").toLowerCase();
+                const desc1 = String(row[1] || "").toLowerCase();
+                
+                const isMatch = keywords.every(k => desc0.includes(k) || desc1.includes(k));
+
+                if (isMatch) {
+                    const namaFix = desc1.length > desc0.length ? row[1] : row[0];
+                    
+                    dataProduk = {
+                        Nama: namaFix,
+                        Harga: typeof row[1] === 'number' ? row[1] : parseFloat(String(row[1] || 0).replace(/[^0-9]/g, '')),
+                        Leadtime: row[2] || '-',
+                        Status: row[3] ? String(row[3]) : '',
+                        StokMTO: 0, StokMTS: 0, Stok2026: 0
+                    };
+                    break; 
+                }
+            }
+            if (dataProduk) break;
+        }
+
+        // TAHAP AMBIL STOK (Selalu ambil dari 3 sheet utama ini)
+        if (dataProduk) {
             const namaBarang = dataProduk.Nama.toLowerCase().trim();
-            const ambilDataStok = (namaSheet, indexKolom) => {
-                const sheet = workbook.Sheets[namaSheet];
-                if (!sheet) return 0;
-                const rows = XLSX.utils.sheet_to_json(sheet, { header: 1 });
-                const match = rows.find(r => r[0] && String(r[0]).toLowerCase().trim() === namaBarang);
+            const ambilData = (namaSheet, indexKolom) => {
+                const s = workbook.Sheets[namaSheet];
+                if (!s) return 0;
+                const rws = XLSX.utils.sheet_to_json(s, { header: 1, defval: "" });
+                const match = rws.find(r => 
+                    (r[0] && String(r[0]).toLowerCase().trim() === namaBarang) ||
+                    (r[1] && String(r[1]).toLowerCase().trim() === namaBarang)
+                );
                 return match ? (typeof match[indexKolom] === 'number' ? match[indexKolom] : parseInt(match[indexKolom]) || 0) : 0;
             };
 
-            dataProduk.StokMTO = ambilDataStok("FREE STOCK MTO", 1);
-            dataProduk.StokMTS = ambilDataStok("FREE STOCK MTS", 1);
-            dataProduk.Stok2026 = ambilDataStok("STOCK 2026", 6);
+            dataProduk.StokMTO = ambilData("FREE STOCK MTO", 1);
+            dataProduk.StokMTS = ambilData("FREE STOCK MTS", 1);
+            dataProduk.Stok2026 = ambilData("STOCK 2026", 6);
         }
 
         return dataProduk;
@@ -80,17 +90,39 @@ client.on('ready', () => {
 });
 
 client.on('message_create', async msg => {
-    // 1. Ambil isi pesan dan ID Chat (Bisa ID Orang atau ID Grup)
-    const isiPesan = msg.body.toLowerCase();
+    // 1. Ambil isi pesan dan ID Chat
+    const isiPesan = msg.body.toLowerCase().trim();
     const chatID = msg.fromMe ? msg.to : msg.from;
 
     // 2. LOGIKA PENGAMAN:
-    // Jika pesan dari saya sendiri (fromMe), bot hanya merespons jika ada kata kunci.
-    // Jika pesan dari orang lain (di grup/japri), bot akan langsung merespons perintah.
+    // Menambahkan '/' ke dalam daftar kata kunci agar fromMe tetap bisa akses
     if (msg.fromMe) {
-        const kataKunci = ['cek ', 'menu'];
+        const kataKunci = ['cek ', 'menu', '/'];
         const apakahPerintah = kataKunci.some(k => isiPesan.startsWith(k));
         if (!apakahPerintah) return;
+    }
+
+    // --- FITUR SLASH COMMAND (MODERN MENU) ---
+    // Jika user hanya mengetik "/" atau "/menu" atau "menu"
+    if (isiPesan === '/' || isiPesan === '/menu' || isiPesan === 'menu') {
+        const menuTeks = `🤖 *PHILIPS PRICE BOT*
+──────────────────
+Silakan pilih menu:
+
+1️⃣ *CEK HARGA (Pricelist)*
+Format: *cek harga [nama barang]*
+
+2️⃣ *HITUNG DISKON (Rincian)*
+Format: *cek diskon [nama barang] [diskon]*
+
+3️⃣ *CEK STOCK TPP (Rinci)*
+Format: *cek stock [nama]*
+
+4️⃣ *FORMAT PENAWARAN (Ready Copy)*
+Format: *cek all [nama] [diskon]*
+Contoh: _cek all BVP171 30%_
+──────────────────`;
+        return await client.sendMessage(chatID, menuTeks);
     }
 
     // --- FITUR 4: CEK ALL ---
@@ -120,32 +152,13 @@ client.on('message_create', async msg => {
         }
     }
 
-    // --- MENU UTAMA ---
-    if (isiPesan === 'menu') {
-        const menuTeks = `🤖 *PHILIPS PRICE BOT*
-──────────────────
-Silakan pilih menu:
-
-1️⃣ *CEK HARGA (Pricelist)*
-Format: *cek harga [nama barang]*
-
-2️⃣ *HITUNG DISKON (Rincian)*
-Format: *cek diskon [nama barang] [diskon]*
-
-3️⃣ *CEK STOCK TPP (Rinci)*
-Format: *cek stock [nama]*
-
-4️⃣ *FORMAT PENAWARAN (Ready Copy)*
-Format: *cek all [nama] [diskon]*
-Contoh: _cek all BVP171 30%_
-──────────────────`;
-        return await client.sendMessage(chatID, menuTeks);
-    }
-
     // --- LOGIKA PERINTAH STOCK ---
     if (isiPesan.startsWith('cek stock ')) {
         const namaCari = msg.body.substring(10).trim();
-        const barang = cariDiExcel(namaCari);
+        
+        // CUKUP TAMBAHKAN PARAMETER true DI SINI
+        const barang = cariDiExcel(namaCari, true); 
+        
         if (barang) {
             const totalStok = barang.StokMTO + barang.StokMTS + barang.Stok2026;
             const reply = `📦 *LAPORAN STOK TERPADU*
