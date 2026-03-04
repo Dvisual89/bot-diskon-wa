@@ -1,0 +1,233 @@
+const { Client, LocalAuth } = require('whatsapp-web.js');
+const qrcode = require('qrcode-terminal');
+const XLSX = require('xlsx');
+
+const client = new Client({
+    authStrategy: new LocalAuth(),
+    puppeteer: { args: ['--no-sandbox', '--disable-setuid-sandbox'] }
+});
+
+/**
+ * TAHAP 1: Fungsi Pencarian (Sudah Mendukung Kolom D/Status)
+ */
+function cariDiExcel(namaInput) {
+    try {
+        const workbook = XLSX.readFile('./database.xlsx');
+        const keywords = namaInput.toLowerCase().split(' ').filter(k => k.length > 0);
+ 
+        let dataProduk = null;
+
+        // TAHAP 1: Cari Detail Produk Dasar
+        for (const sheetName of workbook.SheetNames) {
+            const listSheetStok = ["FREE STOCK MTO", "FREE STOCK MTS", "STOCK 2026"];
+            if (listSheetStok.includes(sheetName)) continue;
+
+            const sheet = workbook.Sheets[sheetName];
+            const rows = XLSX.utils.sheet_to_json(sheet, { header: 1 });
+
+            for (let row of rows) {
+                if (!row || !row[0]) continue;
+                const deskripsi = String(row[0]).toLowerCase();
+
+                // Cek apakah semua keyword cocok
+                if (keywords.every(k => deskripsi.includes(k))) {
+                    const statusRaw = row[3] ? String(row[3]).toLowerCase() : '';
+ 
+                    // LOGIKA INTI: Jika mengandung "phase", abaikan dan lanjut cari baris berikutnya
+                    if (statusRaw.includes("phase")) {
+                        continue; 
+                    }
+
+                    // Jika sampai sini, berarti barang TIDAK Phase Out (FOKUS UTAMA)
+                    dataProduk = {
+                        Nama: row[0],
+                        Harga: typeof row[1] === 'number' ? row[1] : parseFloat(String(row[1] || 0).replace(/[^0-9]/g, '')),
+                        Leadtime: row[2] || '-',
+                        Status: '', // Kosong karena bukan phase out
+                        StokMTO: 0,
+                        StokMTS: 0,
+                        Stok2026: 0
+                    };
+                    break; // Berhenti mencari karena sudah ketemu yang aktif
+                }
+            }
+            if (dataProduk) break; 
+        }
+
+        // TAHAP 2: Ambil Data Stok (tetap sama seperti sebelumnya)
+        if (dataProduk) {
+            const namaBarang = dataProduk.Nama.toLowerCase().trim();
+            const ambilDataStok = (namaSheet, indexKolom) => {
+                const sheet = workbook.Sheets[namaSheet];
+                if (!sheet) return 0;
+                const rows = XLSX.utils.sheet_to_json(sheet, { header: 1 });
+                const match = rows.find(r => r[0] && String(r[0]).toLowerCase().trim() === namaBarang);
+                if (match) {
+                    const nilai = match[indexKolom];
+                    return (typeof nilai === 'number') ? nilai : (parseInt(nilai) || 0);
+                }
+                return 0;
+            };
+
+            dataProduk.StokMTO = ambilDataStok("FREE STOCK MTO", 1);
+            dataProduk.StokMTS = ambilDataStok("FREE STOCK MTS", 1);
+            dataProduk.Stok2026 = ambilDataStok("STOCK 2026", 6);
+        }
+
+        return dataProduk;
+    } catch (error) {
+        console.log('❌ Error:', error.message);
+        return null;
+    }
+}
+
+client.on('qr', qr => qrcode.generate(qr, { small: true }));
+
+client.on('ready', () => {
+    console.log('✅ Bot Philips Online!');
+});
+
+/**
+ * TAHAP 2: Logika Pesan (Menampilkan Status Phase Out)
+ */
+client.on('message_create', async msg => {
+    const isiPesan = msg.body.toLowerCase();
+
+    // FITUR 4: CEK ALL (FORMAT PENAWARAN PROFESIONAL)
+    if (isiPesan.startsWith('cek all ')) {
+        const matchFormat = msg.body.match(/cek all (.+) (\d+%|\d+)$/i);
+
+        if (matchFormat) {
+            const namaCari = matchFormat[1].trim(); 
+            const diskonStr = matchFormat[2]; 
+            const persen = parseFloat(diskonStr.replace('%', ''));
+            const barang = cariDiExcel(namaCari);
+
+            if (barang) {
+                const pot = (persen / 100) * barang.Harga;
+                const nettOriginal = barang.Harga - pot;
+                const nettBulat = Math.ceil(nettOriginal / 50) * 50; 
+                const formatRp = (n) => n.toLocaleString('id-ID');
+                const totalStok = (barang.StokMTO || 0) + (barang.StokMTS || 0) + (barang.Stok2026 || 0);
+                const statusStok = totalStok > 0 ? `Ready Stock (${totalStok} unit)` : "Indent";
+
+                const reply = `*${barang.Nama}* harga nett *Rp ${formatRp(nettBulat)} / exc PPN*, Franco Semarang, TPP ${statusStok}.`;
+                return await client.sendMessage(msg.to, reply);
+            } else {
+                return await client.sendMessage(msg.to, `❌ Barang "${namaCari}" tidak ditemukan atau sudah Phase Out.`);
+            }
+        } else {
+        return await client.sendMessage(msg.to, "❌ Format salah. Contoh: *cek all BVP171 30%*");
+        }
+    }
+
+    // MENU UTAMA
+    if (isiPesan === 'menu') {
+        const menuTeks = `🤖 *PHILIPS PRICE BOT*
+──────────────────
+Silakan pilih menu:
+
+1️⃣ *CEK HARGA (Pricelist)*
+Format: *cek harga [nama barang]*
+
+2️⃣ *HITUNG DISKON (Rincian)*
+Format: *cek diskon [nama barang] [diskon]*
+
+3️⃣ *CEK STOCK TPP (Rinci)*
+Format: *cek stock [nama]*
+
+4️⃣ *FORMAT PENAWARAN (Ready Copy)*
+Format: *cek all [nama] [diskon]*
+Contoh: _cek all BVP171 30%_
+──────────────────`;
+        return client.sendMessage(msg.to, menuTeks);
+    }
+
+    // LOGIKA PERINTAH STOCK
+    if (isiPesan.startsWith('cek stock ')) {
+        // Mengambil teks SETELAH "cek stock " (10 karakter)
+        const namaCari = msg.body.substring(10).trim();
+        const barang = cariDiExcel(namaCari);
+
+        if (barang) {
+            const totalStok = barang.StokMTO + barang.StokMTS + barang.Stok2026;
+            const reply = `📦 *LAPORAN STOK TERPADU*
+──────────────────
+🔍 *Produk:* ${barang.Nama}
+
+📊 *Rincian Stok:*
+• FREE STOCK MTO : *${barang.StokMTO}*
+• FREE STOCK MTS : *${barang.StokMTS}*
+• STOCK 2026     : *${barang.Stok2026}*
+
+📈 *TOTAL STOCK : ${totalStok} unit*
+🕒 *Leadtime:* ${barang.Leadtime}
+──────────────────
+_Data real-time dari sistem database._`;
+            return await client.sendMessage(msg.to, reply);
+        } else {
+            return await client.sendMessage(msg.to, `❌ Data stok untuk "${namaCari}" tidak ditemukan.`);
+        }
+    }
+
+    // FITUR 1: CEK HARGA PRICELIST
+    if (isiPesan.startsWith('cek harga ')) {
+        // Mengambil teks SETELAH "cek harga " (10 karakter)
+        const namaCari = msg.body.substring(10).trim();
+        const barang = cariDiExcel(namaCari);
+
+        if (barang) {
+            const formatRp = (n) => "Rp " + Math.round(n).toLocaleString('id-ID');
+            let labelStatus = barang.Status.toLowerCase().includes("phase") ? "\n⚠️ *STATUS: PHASE OUT*" : "";
+
+            const reply = `🔍 *DATA PRICELIST*
+──────────────────
+📦 *Produk:* ${barang.Nama}
+💰 *Price List:* *${formatRp(barang.Harga)}*
+🕒 *Leadtime:* ${barang.Leadtime} ${labelStatus}
+──────────────────
+_Ketik "cek diskon [nama] [diskon]" untuk hitung nett._`;
+            return await client.sendMessage(msg.to, reply);
+        } else {
+            return await client.sendMessage(msg.to, `❌ Barang "${namaCari}" tidak ditemukan.`);
+        }
+    }
+
+    // FITUR 2: CEK HARGA DISKON (LOGIKA LAMA DENGAN PEMBULATAN)
+    if (isiPesan.startsWith('cek diskon ')) {
+        // Menggunakan regex agar nama barang yang mengandung spasi tetap tertangkap dengan benar
+        const match = msg.body.match(/cek diskon (.+) (\d+%|\d+)$/i);
+
+        if (match) {
+            const namaCari = match[1].trim();
+            const diskonStr = match[2];
+            const persen = parseFloat(diskonStr.replace('%', ''));
+            const barang = cariDiExcel(namaCari);
+
+            if (barang) {
+                const pot = (persen / 100) * barang.Harga;
+                const nettOriginal = barang.Harga - pot;
+                const nettBulat = Math.ceil(nettOriginal / 50) * 50;
+                const formatRp = (n) => "Rp " + Math.round(n).toLocaleString('id-ID');
+                let labelStatus = barang.Status.toLowerCase().includes("phase") ? "\n⚠️ *STATUS: PHASE OUT*" : "";
+
+                const reply = `🔍 *HASIL HITUNG DISKON*
+──────────────────
+📦 *Produk:* ${barang.Nama}
+💰 *Price List:* ${formatRp(barang.Harga)}
+🏷️ *Diskon:* ${persen}%
+🕒 *Leadtime:* ${barang.Leadtime} ${labelStatus}
+──────────────────
+💵 *HARGA NETT:* ${formatRp(nettOriginal)}
+⚖️ *PEMBULATAN:* *${formatRp(nettBulat)}*`;
+                return await client.sendMessage(msg.to, reply);
+            } else {
+                return await client.sendMessage(msg.to, `❌ Barang "${namaCari}" tidak ditemukan.`);
+            }
+        } else {
+            return await client.sendMessage(msg.to, "❌ Format salah. Contoh: *cek diskon BVP171 30%*");
+        }
+    }
+});
+
+client.initialize();
