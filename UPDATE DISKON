@@ -12,6 +12,41 @@ const client = new Client({
 
 const sessionPencarian = {};
 
+// FUNGSI 1: Ambil Plafon Diskon dari Excel
+function getMaxDiskon(namaBarang) {
+    try {
+        const path = require('path');
+        const fs = require('fs');
+        const filePath = path.resolve(__dirname, 'database.xlsx');
+        const fileBuffer = fs.readFileSync(filePath);
+        const workbook = XLSX.read(fileBuffer, { type: 'buffer' });
+        
+        const sheetDiskon = ["DISKON 2025", "DISKON 2026"];
+        const keywords = namaBarang.toLowerCase().split(/\s+/);
+        let maxDiskonFound = 0;
+
+        sheetDiskon.forEach(sName => {
+            const sh = workbook.Sheets[sName];
+            if (!sh) return;
+            const data = XLSX.utils.sheet_to_json(sh, { header: 1 });
+
+            for (let row of data) {
+                const deskripsi = String(row[0] || "").toLowerCase();
+                if (keywords.every(k => deskripsi.includes(k))) {
+                    let nilai = parseFloat(row[1]);
+                    if (!isNaN(nilai)) {
+                        if (nilai < 1) nilai = nilai * 100; 
+                        if (nilai > maxDiskonFound) maxDiskonFound = nilai;
+                    }
+                }
+            }
+        });
+        return maxDiskonFound;
+    } catch (e) {
+        return 0;
+    }
+}
+
 function cariDiExcel(namaInput, khususStok = false, minStok = 0) {
     try {
         const path = require('path');
@@ -23,7 +58,7 @@ function cariDiExcel(namaInput, khususStok = false, minStok = 0) {
         
         const inputClean = namaInput.toLowerCase().trim();
         const keywords = inputClean.split(/[\s,]+/).filter(k => k.length > 0);
-
+        
         let hasilPencarian = [];
         const semuaSheet = workbook.SheetNames;
         const sheetStok = ["FREE STOCK MTO", "FREE STOCK MTS", "STOCK 2026"];
@@ -63,72 +98,50 @@ function cariDiExcel(namaInput, khususStok = false, minStok = 0) {
             });
         });
 
-        function getMaxDiskon(namaBarang) {
-    try {
-        const path = require('path');
-        const fs = require('fs');
-        const filePath = path.resolve(__dirname, 'database.xlsx');
-        const fileBuffer = fs.readFileSync(filePath);
-        const workbook = XLSX.read(fileBuffer, { type: 'buffer' });
+        // Daftar sheet yang harus diabaikan (Stok dan Diskon)
+const sheetDilarang = [...sheetStok, "DISKON 2025", "DISKON 2026"];
+
+// Filter agar hanya mencari di sheet Produk/Price List
+const listSheetTarget = semuaSheet.filter(s => !sheetDilarang.includes(s));
+
+for (const sheetName of listSheetTarget) {
+    const sheet = workbook.Sheets[sheetName];
+    // Gunakan raw: true agar angka tidak terformat otomatis oleh XLSX
+    const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: "", raw: true });
+
+    for (let row of rows) {
+        const rawCol0 = row[0];
+        const rawCol1 = row[1]; // Kolom Harga
         
-        const sheetDiskon = ["DISKON 2025", "DISKON 2026"];
-        const keywords = namaBarang.toLowerCase().split(/\s+/);
-        let maxDiskonFound = 0;
+        const val0 = String(rawCol0 || "").replace(/\s+/g, ' ').trim();
+        
+        // Skip jika baris kosong atau header
+        if (!val0 || val0.toLowerCase() === 'description' || val0.toLowerCase() === 'nama barang') continue;
 
-        sheetDiskon.forEach(sName => {
-            const sh = workbook.Sheets[sName];
-            if (!sh) return;
-            const data = XLSX.utils.sheet_to_json(sh, { header: 1 });
+        const desc0 = val0.toLowerCase();
+        const isMatchNama = keywords.every(k => desc0.includes(k));
 
-            for (let row of data) {
-                const deskripsi = String(row[0] || "").toLowerCase();
-                // Mencari baris yang mengandung kata kunci barang
-                if (keywords.every(k => deskripsi.includes(k))) {
-                    let nilai = parseFloat(row[1]);
-                    if (!isNaN(nilai)) {
-                        // Jika di excel tertulis 0.35, ubah jadi 35
-                        if (nilai < 1) nilai = nilai * 100; 
-                        if (nilai > maxDiskonFound) maxDiskonFound = nilai;
-                    }
+        if (isMatchNama) {
+            const dataStok = mapStok.get(val0) || { mto: 0, mts: 0, s2026: 0 };
+            const totalStok = dataStok.mto + dataStok.mts + dataStok.s2026;
+
+            if (totalStok >= minStok) {
+                let hargaFinal = 0;
+                
+                // Cek apakah rawCol1 memang angka
+                if (typeof rawCol1 === 'number') {
+                    hargaFinal = rawCol1;
+                } else {
+                    // Jika string (misal: "150.000"), bersihkan karakter non-angka
+                    const cleanHarga = String(rawCol1 || "0").replace(/[^0-9]/g, '');
+                    hargaFinal = parseInt(cleanHarga) || 0;
                 }
-            }
-        });
-        return maxDiskonFound;
-    } catch (e) {
-        return 0;
-    }
-}
 
-        const listSheetTarget = semuaSheet.filter(s => !sheetStok.includes(s));
-
-        for (const sheetName of listSheetTarget) {
-            const sheet = workbook.Sheets[sheetName];
-            const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: "" });
-
-            for (let row of rows) {
-                const val0 = String(row[0] || "").replace(/\s+/g, ' ').trim();
-                const val1 = String(row[1] || "").replace(/\s+/g, ' ').trim();
-                
-                if (!val0 && !val1) continue;
-
-                const desc0 = val0.toLowerCase();
-                const desc1 = val1.toLowerCase();
-                
-                const dataStok = mapStok.get(val0) || mapStok.get(val1) || { mto: 0, mts: 0, s2026: 0 };
-                const totalStok = dataStok.mto + dataStok.mts + dataStok.s2026;
-
-                const isMatchNama = keywords.every(k => desc0.includes(k) || desc1.includes(k));
-                const isEnoughStok = totalStok >= minStok;
-
-                if (isMatchNama && isEnoughStok) {
-                    const namaFix = val1.length > val0.length ? val1 : val0;
-                    
-                    let hargaFinal = 0;
-                    if (typeof row[1] === 'number') hargaFinal = row[1];
-                    else hargaFinal = parseFloat(String(row[1]).replace(/[^0-9]/g, '')) || 0;
-
+                // VALIDASI: Harga harus lebih dari 100 (asumsi tidak ada barang seharga < Rp 100)
+                // Ini untuk mencegah diskon (0.35) atau baris sampah masuk
+                if (hargaFinal > 100) {
                     hasilPencarian.push({
-                        Nama: namaFix,
+                        Nama: val0,
                         Harga: hargaFinal,
                         Leadtime: String(row[2] || "-"),
                         Status: String(row[3] || ""),
@@ -140,6 +153,8 @@ function cariDiExcel(namaInput, khususStok = false, minStok = 0) {
                 }
             }
         }
+    }
+}
         
         const exact = hasilPencarian.find(b => b.Nama.toLowerCase().trim() === inputClean);
         return exact ? [exact] : hasilPencarian;
@@ -160,13 +175,22 @@ client.on('message_create', async msg => {
     const isiPesan = msg.body.toLowerCase().trim();
     const chatID = msg.fromMe ? msg.to : msg.from;
 
-    // --- LOGIKA BARU: KONFIRMASI OVER-DISCOUNT ---
+    // --- LOGIKA RESET: Jika user mengetik perintah baru (diawali /) ---
+    // Ini supaya bot tidak terjebak di "daftar pilihan" sebelumnya
+    if (isiPesan.startsWith('/')) {
+        if (sessionPencarian[chatID]) {
+            sessionPencarian[chatID].data = null; 
+            sessionPencarian[chatID].fitur = null;
+            // Jangan hapus lastSelected agar bisa /cek diskon tanpa ketik nama lagi
+        }
+    }
+
+    // --- LOGIKA KONFIRMASI OVER-DISCOUNT ---
     if (sessionPencarian[chatID] && sessionPencarian[chatID].fitur === 'konfirmasi_diskon') {
         if (isiPesan === 'y') {
             const { barang, persen, asalFitur } = sessionPencarian[chatID];
-            sessionPencarian[chatID].fitur = null; // Reset fitur agar tidak looping
+            sessionPencarian[chatID].fitur = null; 
             
-            // Jalankan ulang perintah asli setelah disetujui
             if (asalFitur === 'all') {
                 msg.body = `/cek all ${barang.Nama} ${persen}%`;
             } else {
@@ -527,7 +551,6 @@ async function startBot() {
             console.log('✅ Berhasil menghapus SingletonLock.');
         } catch (err) {
             console.log('⚠️ Gagal menghapus file lock secara otomatis.');
-            console.log('💡 Saran: Jalankan "taskkill /F /IM chrome.exe /T" di CMD.');
         }
     }
 
@@ -536,5 +559,3 @@ async function startBot() {
 }
 
 startBot();
-
-client.initialize();
