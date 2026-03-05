@@ -21,28 +21,47 @@ function getMaxDiskon(namaBarang) {
         const fileBuffer = fs.readFileSync(filePath);
         const workbook = XLSX.read(fileBuffer, { type: 'buffer' });
         
-        const sheetDiskon = ["DISKON 2025", "DISKON 2026"];
-        const keywords = namaBarang.toLowerCase().split(/\s+/);
+        // Membersihkan input: hapus spasi ganda, titik, dan ubah ke lowercase
+        const namaCari = namaBarang.toLowerCase().replace(/[^a-z0-9]/g, '');
+        const daftarSheet = ["DISKON 2026", "DISKON 2025"];
         let maxDiskonFound = 0;
 
-        sheetDiskon.forEach(sName => {
-            const sh = workbook.Sheets[sName];
-            if (!sh) return;
+        for (const namaSheet of daftarSheet) {
+            const sh = workbook.Sheets[namaSheet];
+            if (!sh) continue;
+
+            // Ambil data dalam bentuk array of arrays (header: 1)
             const data = XLSX.utils.sheet_to_json(sh, { header: 1 });
 
             for (let row of data) {
-                const deskripsi = String(row[0] || "").toLowerCase();
-                if (keywords.every(k => deskripsi.includes(k))) {
+                // Bersihkan data di kolom A Excel dari karakter non-alfanumerik
+                let deskripsiDiExcel = String(row[0] || "").toLowerCase().trim();
+                if (!deskripsiDiExcel) continue;
+
+                const deskripsiClean = deskripsiDiExcel.replace(/[^a-z0-9]/g, '');
+
+                // Cek kecocokan (Partial Match)
+                // Contoh: "dn068" ada di dalam "dn068bg2led20..."
+                if (namaCari.includes(deskripsiClean) || deskripsiClean.includes(namaCari)) {
                     let nilai = parseFloat(row[1]);
                     if (!isNaN(nilai)) {
-                        if (nilai < 1) nilai = nilai * 100; 
+                        // Handle jika user nulis 0.35 di excel (maksudnya 35%)
+                        if (nilai < 1 && nilai > 0) nilai = nilai * 100; 
+
+                        // --- FIX PEMBULATAN DI SINI ---
+                        // Menggunakan Math.round agar 56.5999... jadi 56.6
+                        nilai = Math.round(nilai * 10) / 10; 
+                        
                         if (nilai > maxDiskonFound) maxDiskonFound = nilai;
                     }
                 }
             }
-        });
+            // Jika sudah ketemu di sheet 2026 (terbaru), langsung break
+            if (maxDiskonFound > 0) break; 
+        }
         return maxDiskonFound;
     } catch (e) {
+        console.log("❌ Error getMaxDiskon:", e.message);
         return 0;
     }
 }
@@ -446,94 +465,119 @@ Contoh: _/cek all BVP171 30%_
         return await client.sendMessage(chatID, reply, { quotedMessageId: msg.id._serialized });
     }
 
-    // --- FITUR 1: CEK HARGA ---
-    if (isiPesan.startsWith('/cek harga')) {
-        let namaCari = msg.body.substring(10).trim();
-        if (namaCari === "" && sessionPencarian[chatID]?.lastSelected) {
-            namaCari = sessionPencarian[chatID].lastSelected;
-        }
-        if (!namaCari) return await client.sendMessage(chatID, "❌ Sebutkan nama barang.");
+    // --- // --- FITUR 1: CEK HARGA (MURNI TANPA INFO DISKON) ---
+if (isiPesan.startsWith('/cek harga')) {
+    let namaCari = msg.body.substring(10).trim();
+    if (namaCari === "" && sessionPencarian[chatID]?.lastSelected) {
+        namaCari = sessionPencarian[chatID].lastSelected;
+    }
+    if (!namaCari) return await client.sendMessage(chatID, "❌ Sebutkan nama barang.");
 
-        const hasil = cariDiExcel(namaCari);
-        if (hasil.length === 0) return await client.sendMessage(chatID, `❌ Barang "${namaCari}" tidak ditemukan.`);
-        if (hasil.length > 1) {
-            let listPesan = `🔍 *Terdapat beberapa varian "${namaCari}":*\n\n`;
-            hasil.forEach((b, i) => { listPesan += `${i + 1}. ${b.Nama}\n`; });
-            listPesan += `\n*Balas dengan nomor urut atau kata kunci spesifik.*`;
-            const msgList = await client.sendMessage(chatID, listPesan);
-            sessionPencarian[chatID] = { ...sessionPencarian[chatID], fitur: 'harga', data: hasil, msgToDelete: msgList };
-            return;
-        }
+    const hasil = cariDiExcel(namaCari);
+    if (hasil.length === 0) return await client.sendMessage(chatID, `❌ Barang "${namaCari}" tidak ditemukan.`);
+    
+    if (hasil.length > 1) {
+        let listPesan = `🔍 *Terdapat beberapa varian "${namaCari}":*\n\n`;
+        hasil.forEach((b, i) => { listPesan += `${i + 1}. ${b.Nama}\n`; });
+        listPesan += `\n*Balas dengan nomor urut atau kata kunci spesifik.*`;
+        const msgList = await client.sendMessage(chatID, listPesan);
+        sessionPencarian[chatID] = { ...sessionPencarian[chatID], fitur: 'harga', data: hasil, msgToDelete: msgList };
+        return;
+    }
 
-        const barang = hasil[0];
-        updateMemory(barang.Nama);
-        const formatRp = (n) => "Rp " + Math.round(n).toLocaleString('id-ID');
-        let labelStatus = barang.Status.toLowerCase().includes("phase") ? "\n⚠️ *STATUS: PHASE OUT*" : "";
-        const reply = `🔍 *DATA PRICELIST*
+    const barang = hasil[0];
+    updateMemory(barang.Nama);
+    
+    const formatRp = (n) => "Rp " + Math.round(n).toLocaleString('id-ID');
+    let labelStatus = barang.Status.toLowerCase().includes("phase") ? "\n⚠️ *STATUS: PHASE OUT*" : "";
+    
+    // Tampilan Bersih: Hanya Nama, Harga, dan Leadtime
+    const reply = `🔍 *DATA PRICELIST*
 ──────────────────
 📦 *Produk:* ${barang.Nama}
 💰 *Price List:* *${formatRp(barang.Harga)}*
 🕒 *Leadtime:* ${barang.Leadtime} ${labelStatus}
 ──────────────────
-_Ketik "/cek diskon [nama] [diskon]" untuk hitung nett._`;
-        return await client.sendMessage(chatID, reply, { quotedMessageId: msg.id._serialized });
-    }
+_Ketik "/cek diskon [diskon]" untuk hitung nett._`;
+    
+    return await client.sendMessage(chatID, reply, { quotedMessageId: msg.id._serialized });
+}
 
-    // --- FITUR 2: CEK DISKON (VERSI VALIDASI) ---
+// --- FITUR 2: CEK DISKON (CERDAS) ---
     if (isiPesan.startsWith('/cek diskon')) {
         const input = msg.body.substring(11).trim();
         let namaCari, persen;
+        
+        // Cek apakah ada input angka/persen (misal: /cek diskon 30% atau /cek diskon BVP 30%)
         const matchLengkap = msg.body.match(/\/cek diskon (.+) (\d+%|\d+)$/i);
         const isOnlyPercent = /^(\d+%|\d+)$/.test(input);
+        const isOnlyCommand = input === ""; // User cuma ketik "/cek diskon"
 
+        // LOGIKA PENENTUAN NAMA BARANG & PERSEN
         if (matchLengkap) {
             namaCari = matchLengkap[1].trim();
             persen = parseFloat(matchLengkap[2].replace('%', ''));
         } else if (isOnlyPercent && sessionPencarian[chatID]?.lastSelected) {
             namaCari = sessionPencarian[chatID].lastSelected;
             persen = parseFloat(input.replace('%', ''));
+        } else if (isOnlyCommand && sessionPencarian[chatID]?.lastSelected) {
+            namaCari = sessionPencarian[chatID].lastSelected;
+            persen = null; // Menandakan user hanya ingin cek plafon
         }
 
-        if (namaCari && persen !== undefined) {
+        if (namaCari) {
             const hasil = cariDiExcel(namaCari);
             if (hasil.length === 0) return await client.sendMessage(chatID, `❌ Barang "${namaCari}" tidak ditemukan.`);
             
             if (hasil.length > 1) {
-                let listPesan = `🔍 *Pilih tipe untuk hitung diskon "${namaCari}":*\n\n`;
+                let listPesan = `🔍 *Pilih tipe untuk cek diskon "${namaCari}":*\n\n`;
                 hasil.forEach((b, i) => { listPesan += `${i + 1}. ${b.Nama}\n`; });
-                listPesan += `\n*Balas dengan nomor urut atau kata kunci spesifik.*`;
+                listPesan += `\n*Balas dengan nomor urut.*`;
                 const msgList = await client.sendMessage(chatID, listPesan);
                 sessionPencarian[chatID] = { ...sessionPencarian[chatID], fitur: 'diskon', data: hasil, diskon: persen, msgToDelete: msgList };
                 return;
             }
 
             const barang = hasil[0];
-
-            // --- LOGIKA VALIDASI PLAFON DISKON ---
             const diskonMax = getMaxDiskon(barang.Nama);
-            if (diskonMax > 0 && persen > diskonMax && sessionPencarian[chatID]?.fitur !== 'konfirmasi_diskon') {
-                sessionPencarian[chatID] = { fitur: 'konfirmasi_diskon', barang, persen, asalFitur: 'diskon' };
-                return await client.sendMessage(chatID, `⚠️ *PERINGATAN DISKON*\n\nBatas maksimal diskon untuk produk ini adalah *${diskonMax}%*.\n\nAnda memasukkan *${persen}%*. Tetap lanjut?\n*(Balas Y/T)*`);
+            updateMemory(barang.Nama);
+
+            // KONDISI A: Hanya Cek Plafon (Tanpa Hitung)
+            if (persen === null) {
+                const infoPlafon = diskonMax > 0 ? `🛡️ *Plafon Diskon:* ${diskonMax}%` : "🛡️ *Plafon Diskon:* Tidak diatur dalam sistem.";
+                const replyPlafon = `🔍 *INFO APPROVAL DISKON*
+──────────────────
+📦 *Produk:* ${barang.Nama}
+${infoPlafon}
+──────────────────
+_Ketik "/cek diskon [angka]%" untuk hitung nett._`;
+                return await client.sendMessage(chatID, replyPlafon, { quotedMessageId: msg.id._serialized });
             }
 
-            updateMemory(barang.Nama, persen);
+            // KONDISI B: Hitung Diskon (Input Persen Ada)
+            if (diskonMax > 0 && persen > diskonMax && sessionPencarian[chatID]?.fitur !== 'konfirmasi_diskon') {
+                sessionPencarian[chatID] = { fitur: 'konfirmasi_diskon', barang, persen, asalFitur: 'diskon' };
+                return await client.sendMessage(chatID, `⚠️ *PERINGATAN DISKON*\n\nBatas maksimal diskon adalah *${diskonMax}%*.\n\nAnda memasukkan *${persen}%*. Tetap lanjut?\n*(Balas Y/T)*`);
+            }
+
             const pot = (persen / 100) * barang.Harga;
             const nettOriginal = barang.Harga - pot;
             const nettBulat = Math.ceil(nettOriginal / 50) * 50;
             const formatRp = (n) => "Rp " + Math.round(n).toLocaleString('id-ID');
-            let labelStatus = barang.Status.toLowerCase().includes("phase") ? "\n⚠️ *STATUS: PHASE OUT*" : "";
             
-            const reply = `🔍 *HASIL HITUNG DISKON*
+            const replyHitung = `🔍 *HASIL HITUNG DISKON*
 ──────────────────
 📦 *Produk:* ${barang.Nama}
 💰 *Price List:* ${formatRp(barang.Harga)}
-🏷️ *Diskon:* ${persen}%
-🕒 *Leadtime:* ${barang.Leadtime} ${labelStatus}
+🏷️ *Diskon Input:* ${persen}%
+🛡️ *Plafon Disc:* ${diskonMax}%
 ──────────────────
 💵 *HARGA NETT:* ${formatRp(nettOriginal)}
 ⚖️ *PEMBULATAN:* *${formatRp(nettBulat)}*`;
             
-            return await client.sendMessage(chatID, reply, { quotedMessageId: msg.id._serialized });
+            return await client.sendMessage(chatID, replyHitung, { quotedMessageId: msg.id._serialized });
+        } else {
+             return await client.sendMessage(chatID, "❌ Sebutkan nama barang atau lakukan /cek harga terlebih dahulu.");
         }
     }
 });
