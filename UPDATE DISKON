@@ -163,7 +163,6 @@ function cariDiExcel(namaInput, khususStok = false, minStok = 0) {
     }
 }
 
-// ... (Sisa code client.on('message_create') dan seterusnya tetap sama)
 
 client.on('qr', qr => qrcode.generate(qr, { small: true }));
 
@@ -236,13 +235,18 @@ client.on('message_create', async msg => {
         }
     }
 
+    // --- PERBAIKAN FUNGSI MEMORI ---
     const updateMemory = (nama, diskon = null) => {
         if (!sessionPencarian[chatID]) sessionPencarian[chatID] = {};
         if (nama) sessionPencarian[chatID].lastSelected = nama;
-        if (diskon !== null) sessionPencarian[chatID].lastDiscount = diskon;
+        
+        // Hanya update diskon jika ada input diskon baru (tidak null/undefined)
+        if (diskon !== null && diskon !== undefined) {
+            sessionPencarian[chatID].lastDiscount = diskon;
+        }
     };
 
-    // --- LOGIKA CERDAS: PEMILIHAN DARI LIST ---
+    // --- // --- LOGIKA CERDAS: PEMILIHAN DARI LIST ---
     if (sessionPencarian[chatID] && sessionPencarian[chatID].data) {
         const session = sessionPencarian[chatID];
         const daftarBarang = session.data;
@@ -262,11 +266,16 @@ client.on('message_create', async msg => {
         }
 
         if (barangTerpilih) {
-            updateMemory(barangTerpilih.Nama); 
-            const diskonFinal = session.diskon || session.lastDiscount || 0;
+            // AMBIL DISKON TERAKHIR DARI MEMORI SEBELUM UPDATE
+            const diskonTerakhir = session.diskon || session.lastDiscount;
+            
+            // Update memory: Simpan Nama baru DAN bawa Diskon lama
+            updateMemory(barangTerpilih.Nama, diskonTerakhir); 
 
-            // Jika fitur ALL, langsung interupsi tanya Qty
+            const diskonFinal = diskonTerakhir || 0;
+
             if (session.fitur === 'all') {
+                // PERBAIKAN DI SINI: Samakan menjadi 'menunggu_qty'
                 sessionPencarian[chatID].fitur = 'menunggu_qty';
                 sessionPencarian[chatID].selectedBarang = barangTerpilih;
                 sessionPencarian[chatID].diskon = diskonFinal;
@@ -333,10 +342,11 @@ Contoh: _/cek all BVP171 30%_
         return await client.sendMessage(chatID, menuTeks);
     }
 
-    // --- FITUR 4: CEK ALL (DENGAN VALIDASI DISKON) ---
+    // --- FITUR 4: CEK ALL (FIXED LOGIC) ---
     if (isiPesan.startsWith('/cek all')) {
         const input = msg.body.substring(8).trim(); 
         let namaCari, persen;
+        
         const matchLengkap = msg.body.match(/\/cek all (.+) (\d+%|\d+)$/i);
         const isOnlyPercent = /^(\d+%|\d+)$/.test(input);
 
@@ -346,12 +356,17 @@ Contoh: _/cek all BVP171 30%_
         } else if (isOnlyPercent && sessionPencarian[chatID]?.lastSelected) {
             namaCari = sessionPencarian[chatID].lastSelected;
             persen = parseFloat(input.replace('%', ''));
-        } else if (input === "" && sessionPencarian[chatID]?.lastSelected && sessionPencarian[chatID]?.lastDiscount) {
+        } else if (input !== "" && !isOnlyPercent) {
+            namaCari = input;
+            persen = sessionPencarian[chatID]?.lastDiscount;
+        } else if (input === "" && sessionPencarian[chatID]?.lastSelected) {
             namaCari = sessionPencarian[chatID].lastSelected;
             persen = sessionPencarian[chatID].lastDiscount;
-        } else if (input !== "" && !isOnlyPercent && sessionPencarian[chatID]?.lastDiscount) {
-            namaCari = input;
-            persen = sessionPencarian[chatID].lastDiscount;
+        }
+
+        // Jika barang ada tapi diskon kosong di memori
+        if (namaCari && (persen === undefined || persen === null)) {
+            return await client.sendMessage(chatID, `❌ Diskon untuk *${namaCari}* belum ditentukan.\nContoh: */cek all ${namaCari} 45%*`);
         }
 
         if (namaCari && persen !== undefined) {
@@ -359,33 +374,33 @@ Contoh: _/cek all BVP171 30%_
             if (hasil.length === 0) return await client.sendMessage(chatID, `❌ Barang "${namaCari}" tidak ditemukan.`);
             
             if (hasil.length > 1) {
-                let listPesan = `🔍 *Pilih tipe yang spesifik untuk "${namaCari}":*\n\n`;
+                let listPesan = `🔍 *Pilih tipe spesifik (Otomatis Diskon: ${persen}%):*\n\n`;
                 hasil.forEach((b, i) => { listPesan += `${i + 1}. ${b.Nama}\n`; });
-                listPesan += `\n*Balas dengan nomor urut atau kata kunci spesifik.*`;
+                listPesan += `\n*Balas dengan nomor urut.*`;
                 const msgList = await client.sendMessage(chatID, listPesan);
-                sessionPencarian[chatID] = { ...sessionPencarian[chatID], fitur: 'all', data: hasil, diskon: persen, msgToDelete: msgList };
+                // Simpan diskon ke session agar saat user pilih nomor, diskon tidak hilang
+                sessionPencarian[chatID] = { ...sessionPencarian[chatID], fitur: 'all', data: hasil, diskon: persen, lastDiscount: persen, msgToDelete: msgList };
                 return;
             }
 
             const barang = hasil[0];
-
-            // --- TAMBAHAN VALIDASI PLAFON DISKON ---
             const diskonMax = getMaxDiskon(barang.Nama);
+
             if (diskonMax > 0 && persen > diskonMax && sessionPencarian[chatID]?.fitur !== 'konfirmasi_diskon') {
-                sessionPencarian[chatID] = { fitur: 'konfirmasi_diskon', barang, persen, asalFitur: 'all' };
-                return await client.sendMessage(chatID, `⚠️ *PERINGATAN DISKON*\n\nBatas maksimal diskon untuk produk ini adalah *${diskonMax}%*.\n\nAnda memasukkan *${persen}%*. Tetap lanjut?\n*(Balas Y/T)*`);
+                sessionPencarian[chatID] = { ...sessionPencarian[chatID], fitur: 'konfirmasi_diskon', barang, persen, asalFitur: 'all' };
+                return await client.sendMessage(chatID, `⚠️ *PERINGATAN DISKON*\n\nBatas maksimal diskon adalah *${diskonMax}%*.\n\nAnda memasukkan *${persen}%*. Tetap lanjut?\n*(Balas Y/T)*`);
             }
 
+            // SIMPAN KE MEMORI SEBELUM TANYA QTY
             updateMemory(barang.Nama, persen);
-
-            // Jika lolos validasi, lanjut tanya Qty
-            sessionPencarian[chatID].fitur = 'menunggu_qty';
+            
+            sessionPencarian[chatID].fitur = 'menunggu_qty'; 
             sessionPencarian[chatID].selectedBarang = barang;
             sessionPencarian[chatID].diskon = persen;
 
-            return await client.sendMessage(chatID, `Berapa kebutuhan Qty untuk *${barang.Nama}*?`);
+            return await client.sendMessage(chatID, `Berapa kebutuhan Qty untuk *${barang.Nama}*?\n_(Menggunakan diskon ${persen}%)_`);
         } else {
-            return await client.sendMessage(chatID, "❌ Format salah atau memori kosong.\nContoh: */cek all BVP171 30%*");
+            return await client.sendMessage(chatID, "❌ Masukkan nama barang atau lakukan /cek harga terlebih dahulu.");
         }
     }
 
@@ -534,6 +549,8 @@ ${infoPlafon}
 _Ketik "/cek diskon [angka]%" untuk hitung nett._`;
                 return await client.sendMessage(chatID, replyPlafon, { quotedMessageId: msg.id._serialized });
             }
+
+            updateMemory(barang.Nama, persen); // Simpan keduanya ke memori
 
             // KONDISI B: Hitung Diskon (Input Persen Ada)
             if (diskonMax > 0 && persen > diskonMax && sessionPencarian[chatID]?.fitur !== 'konfirmasi_diskon') {
