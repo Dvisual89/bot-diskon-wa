@@ -66,12 +66,13 @@ function getMaxDiskon(namaBarang) {
     }
 }
 
+// ... (Bagian atas code tetap sama)
+
 function cariDiExcel(namaInput, khususStok = false, minStok = 0) {
     try {
         const path = require('path');
         const fs = require('fs');
         const filePath = path.resolve(__dirname, 'database.xlsx');
-        
         const fileBuffer = fs.readFileSync(filePath);
         const workbook = XLSX.read(fileBuffer, { type: 'buffer' });
         
@@ -83,33 +84,16 @@ function cariDiExcel(namaInput, khususStok = false, minStok = 0) {
         const sheetStok = ["FREE STOCK MTO", "FREE STOCK MTS", "STOCK 2026"];
         
         let mapStok = new Map();
-
         sheetStok.forEach(sName => {
             const sh = workbook.Sheets[sName];
             if (!sh) return;
             const data = XLSX.utils.sheet_to_json(sh, { header: 1, raw: true });
-            
             data.forEach(row => {
                 const nama = String(row[0] || "").replace(/\s+/g, ' ').trim();
                 if (!nama) return;
-
-                let qtyRaw;
-                if (sName === "STOCK 2026") {
-                    qtyRaw = row[6]; 
-                } else {
-                    qtyRaw = row[1]; 
-                }
-
-                let qty = 0;
-                if (typeof qtyRaw === 'number') {
-                    qty = qtyRaw;
-                } else {
-                    qty = parseInt(String(qtyRaw || "0").replace(/[^0-9]/g, '')) || 0;
-                }
-                
-                if (!mapStok.has(nama)) {
-                    mapStok.set(nama, { mto: 0, mts: 0, s2026: 0 });
-                }
+                let qtyRaw = (sName === "STOCK 2026") ? row[6] : row[1]; 
+                let qty = (typeof qtyRaw === 'number') ? qtyRaw : (parseInt(String(qtyRaw || "0").replace(/[^0-9]/g, '')) || 0);
+                if (!mapStok.has(nama)) mapStok.set(nama, { mto: 0, mts: 0, s2026: 0 });
                 const current = mapStok.get(nama);
                 if (sName === "FREE STOCK MTO") current.mto += qty;
                 if (sName === "FREE STOCK MTS") current.mts += qty;
@@ -117,72 +101,69 @@ function cariDiExcel(namaInput, khususStok = false, minStok = 0) {
             });
         });
 
-        // Daftar sheet yang harus diabaikan (Stok dan Diskon)
-const sheetDilarang = [...sheetStok, "DISKON 2025", "DISKON 2026"];
+        const sheetDilarang = [...sheetStok, "DISKON 2025", "DISKON 2026"];
+        const listSheetTarget = semuaSheet.filter(s => !sheetDilarang.includes(s));
 
-// Filter agar hanya mencari di sheet Produk/Price List
-const listSheetTarget = semuaSheet.filter(s => !sheetDilarang.includes(s));
+        for (const sheetName of listSheetTarget) {
+            const sheet = workbook.Sheets[sheetName];
+            const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: "", raw: true });
 
-for (const sheetName of listSheetTarget) {
-    const sheet = workbook.Sheets[sheetName];
-    // Gunakan raw: true agar angka tidak terformat otomatis oleh XLSX
-    const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: "", raw: true });
+            for (let row of rows) {
+                const val0 = String(row[0] || "").replace(/\s+/g, ' ').trim();
+                if (!val0 || val0.toLowerCase() === 'description' || val0.toLowerCase() === 'nama barang') continue;
 
-    for (let row of rows) {
-        const rawCol0 = row[0];
-        const rawCol1 = row[1]; // Kolom Harga
-        
-        const val0 = String(rawCol0 || "").replace(/\s+/g, ' ').trim();
-        
-        // Skip jika baris kosong atau header
-        if (!val0 || val0.toLowerCase() === 'description' || val0.toLowerCase() === 'nama barang') continue;
+                const desc0 = val0.toLowerCase();
+                const isMatchNama = keywords.every(k => desc0.includes(k));
 
-        const desc0 = val0.toLowerCase();
-        const isMatchNama = keywords.every(k => desc0.includes(k));
+                if (isMatchNama) {
+                    const dataStok = mapStok.get(val0) || { mto: 0, mts: 0, s2026: 0 };
+                    const totalStok = dataStok.mto + dataStok.mts + dataStok.s2026;
+                    if (totalStok >= minStok) {
+                        let rawCol1 = row[1];
+                        let hargaFinal = (typeof rawCol1 === 'number') ? rawCol1 : (parseInt(String(rawCol1 || "0").replace(/[^0-9]/g, '')) || 0);
 
-        if (isMatchNama) {
-            const dataStok = mapStok.get(val0) || { mto: 0, mts: 0, s2026: 0 };
-            const totalStok = dataStok.mto + dataStok.mts + dataStok.s2026;
-
-            if (totalStok >= minStok) {
-                let hargaFinal = 0;
-                
-                // Cek apakah rawCol1 memang angka
-                if (typeof rawCol1 === 'number') {
-                    hargaFinal = rawCol1;
-                } else {
-                    // Jika string (misal: "150.000"), bersihkan karakter non-angka
-                    const cleanHarga = String(rawCol1 || "0").replace(/[^0-9]/g, '');
-                    hargaFinal = parseInt(cleanHarga) || 0;
-                }
-
-                // VALIDASI: Harga harus lebih dari 100 (asumsi tidak ada barang seharga < Rp 100)
-                // Ini untuk mencegah diskon (0.35) atau baris sampah masuk
-                if (hargaFinal > 100) {
-                    hasilPencarian.push({
-                        Nama: val0,
-                        Harga: hargaFinal,
-                        Leadtime: String(row[2] || "-"),
-                        Status: String(row[3] || ""),
-                        StokMTO: dataStok.mto,
-                        StokMTS: dataStok.mts,
-                        Stok2026: dataStok.s2026,
-                        TotalStok: totalStok
-                    });
+                        if (hargaFinal > 100) {
+                            hasilPencarian.push({
+                                Nama: val0,
+                                Harga: hargaFinal,
+                                Leadtime: String(row[2] || "-"),
+                                Status: String(row[3] || ""), // Kolom status (PHASE OUT / AKTIF)
+                                StokMTO: dataStok.mto,
+                                StokMTS: dataStok.mts,
+                                Stok2026: dataStok.s2026,
+                                TotalStok: totalStok
+                            });
+                        }
+                    }
                 }
             }
         }
-    }
-}
-        
-        const exact = hasilPencarian.find(b => b.Nama.toLowerCase().trim() === inputClean);
-        return exact ? [exact] : hasilPencarian;
+
+        // --- LOGIKA SORTING CERDAS ---
+        // 1. Kelompokkan barang Aktif di atas, Phase Out di bawah
+        hasilPencarian.sort((a, b) => {
+            const isAPhaseOut = a.Status.toLowerCase().includes("phase");
+            const isBPhaseOut = b.Status.toLowerCase().includes("phase");
+            if (isAPhaseOut && !isBPhaseOut) return 1;
+            if (!isAPhaseOut && isBPhaseOut) return -1;
+            return 0;
+        });
+
+        // 2. Jika ada "Exact Match" yang AKTIF, prioritaskan itu saja
+        const exactAktif = hasilPencarian.find(b => 
+            b.Nama.toLowerCase().trim() === inputClean && 
+            !b.Status.toLowerCase().includes("phase")
+        );
+
+        return exactAktif ? [exactAktif] : hasilPencarian;
 
     } catch (error) {
         console.log('❌ Error Deep Reading:', error.message);
         return [];
     }
 }
+
+// ... (Sisa code client.on('message_create') dan seterusnya tetap sama)
 
 client.on('qr', qr => qrcode.generate(qr, { small: true }));
 
