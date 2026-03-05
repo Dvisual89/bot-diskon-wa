@@ -563,12 +563,17 @@ _Ketik "/cek diskon [angka]%" untuk hitung nett._`;
             const nettBulat = Math.ceil(nettOriginal / 50) * 50;
             const formatRp = (n) => "Rp " + Math.round(n).toLocaleString('id-ID');
             
+            // --- LOGIKA HITUNG SELISIH PLAFON ---
+            const selisih = (diskonMax - persen).toFixed(1);
+            const barisSelisih = diskonMax > 0 ? `📉 *Selisih Plafon:* ${selisih}%` : "";
+            
             const replyHitung = `🔍 *HASIL HITUNG DISKON*
 ──────────────────
 📦 *Produk:* ${barang.Nama}
 💰 *Price List:* ${formatRp(barang.Harga)}
 🏷️ *Diskon Input:* ${persen}%
 🛡️ *Plafon Disc:* ${diskonMax}%
+${barisSelisih}
 ──────────────────
 💵 *HARGA NETT:* ${formatRp(nettOriginal)}
 ⚖️ *PEMBULATAN:* *${formatRp(nettBulat)}*`;
