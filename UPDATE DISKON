@@ -1,0 +1,540 @@
+const { Client, LocalAuth } = require('whatsapp-web.js');
+const qrcode = require('qrcode-terminal');
+const XLSX = require('xlsx');
+
+const client = new Client({
+    authStrategy: new LocalAuth(),
+    puppeteer: { 
+        headless: true, // <--- Tambahkan di sini
+        args: ['--no-sandbox', '--disable-setuid-sandbox'] 
+    }
+});
+
+const sessionPencarian = {};
+
+function cariDiExcel(namaInput, khususStok = false, minStok = 0) {
+    try {
+        const path = require('path');
+        const fs = require('fs');
+        const filePath = path.resolve(__dirname, 'database.xlsx');
+        
+        const fileBuffer = fs.readFileSync(filePath);
+        const workbook = XLSX.read(fileBuffer, { type: 'buffer' });
+        
+        const inputClean = namaInput.toLowerCase().trim();
+        const keywords = inputClean.split(/[\s,]+/).filter(k => k.length > 0);
+
+        let hasilPencarian = [];
+        const semuaSheet = workbook.SheetNames;
+        const sheetStok = ["FREE STOCK MTO", "FREE STOCK MTS", "STOCK 2026"];
+        
+        let mapStok = new Map();
+
+        sheetStok.forEach(sName => {
+            const sh = workbook.Sheets[sName];
+            if (!sh) return;
+            const data = XLSX.utils.sheet_to_json(sh, { header: 1, raw: true });
+            
+            data.forEach(row => {
+                const nama = String(row[0] || "").replace(/\s+/g, ' ').trim();
+                if (!nama) return;
+
+                let qtyRaw;
+                if (sName === "STOCK 2026") {
+                    qtyRaw = row[6]; 
+                } else {
+                    qtyRaw = row[1]; 
+                }
+
+                let qty = 0;
+                if (typeof qtyRaw === 'number') {
+                    qty = qtyRaw;
+                } else {
+                    qty = parseInt(String(qtyRaw || "0").replace(/[^0-9]/g, '')) || 0;
+                }
+                
+                if (!mapStok.has(nama)) {
+                    mapStok.set(nama, { mto: 0, mts: 0, s2026: 0 });
+                }
+                const current = mapStok.get(nama);
+                if (sName === "FREE STOCK MTO") current.mto += qty;
+                if (sName === "FREE STOCK MTS") current.mts += qty;
+                if (sName === "STOCK 2026") current.s2026 += qty;
+            });
+        });
+
+        function getMaxDiskon(namaBarang) {
+    try {
+        const path = require('path');
+        const fs = require('fs');
+        const filePath = path.resolve(__dirname, 'database.xlsx');
+        const fileBuffer = fs.readFileSync(filePath);
+        const workbook = XLSX.read(fileBuffer, { type: 'buffer' });
+        
+        const sheetDiskon = ["DISKON 2025", "DISKON 2026"];
+        const keywords = namaBarang.toLowerCase().split(/\s+/);
+        let maxDiskonFound = 0;
+
+        sheetDiskon.forEach(sName => {
+            const sh = workbook.Sheets[sName];
+            if (!sh) return;
+            const data = XLSX.utils.sheet_to_json(sh, { header: 1 });
+
+            for (let row of data) {
+                const deskripsi = String(row[0] || "").toLowerCase();
+                // Mencari baris yang mengandung kata kunci barang
+                if (keywords.every(k => deskripsi.includes(k))) {
+                    let nilai = parseFloat(row[1]);
+                    if (!isNaN(nilai)) {
+                        // Jika di excel tertulis 0.35, ubah jadi 35
+                        if (nilai < 1) nilai = nilai * 100; 
+                        if (nilai > maxDiskonFound) maxDiskonFound = nilai;
+                    }
+                }
+            }
+        });
+        return maxDiskonFound;
+    } catch (e) {
+        return 0;
+    }
+}
+
+        const listSheetTarget = semuaSheet.filter(s => !sheetStok.includes(s));
+
+        for (const sheetName of listSheetTarget) {
+            const sheet = workbook.Sheets[sheetName];
+            const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: "" });
+
+            for (let row of rows) {
+                const val0 = String(row[0] || "").replace(/\s+/g, ' ').trim();
+                const val1 = String(row[1] || "").replace(/\s+/g, ' ').trim();
+                
+                if (!val0 && !val1) continue;
+
+                const desc0 = val0.toLowerCase();
+                const desc1 = val1.toLowerCase();
+                
+                const dataStok = mapStok.get(val0) || mapStok.get(val1) || { mto: 0, mts: 0, s2026: 0 };
+                const totalStok = dataStok.mto + dataStok.mts + dataStok.s2026;
+
+                const isMatchNama = keywords.every(k => desc0.includes(k) || desc1.includes(k));
+                const isEnoughStok = totalStok >= minStok;
+
+                if (isMatchNama && isEnoughStok) {
+                    const namaFix = val1.length > val0.length ? val1 : val0;
+                    
+                    let hargaFinal = 0;
+                    if (typeof row[1] === 'number') hargaFinal = row[1];
+                    else hargaFinal = parseFloat(String(row[1]).replace(/[^0-9]/g, '')) || 0;
+
+                    hasilPencarian.push({
+                        Nama: namaFix,
+                        Harga: hargaFinal,
+                        Leadtime: String(row[2] || "-"),
+                        Status: String(row[3] || ""),
+                        StokMTO: dataStok.mto,
+                        StokMTS: dataStok.mts,
+                        Stok2026: dataStok.s2026,
+                        TotalStok: totalStok
+                    });
+                }
+            }
+        }
+        
+        const exact = hasilPencarian.find(b => b.Nama.toLowerCase().trim() === inputClean);
+        return exact ? [exact] : hasilPencarian;
+
+    } catch (error) {
+        console.log('❌ Error Deep Reading:', error.message);
+        return [];
+    }
+}
+
+client.on('qr', qr => qrcode.generate(qr, { small: true }));
+
+client.on('ready', () => {
+    console.log('✅ Bot Philips Online!');
+});
+
+client.on('message_create', async msg => {
+    const isiPesan = msg.body.toLowerCase().trim();
+    const chatID = msg.fromMe ? msg.to : msg.from;
+
+    // --- LOGIKA BARU: KONFIRMASI OVER-DISCOUNT ---
+    if (sessionPencarian[chatID] && sessionPencarian[chatID].fitur === 'konfirmasi_diskon') {
+        if (isiPesan === 'y') {
+            const { barang, persen, asalFitur } = sessionPencarian[chatID];
+            sessionPencarian[chatID].fitur = null; // Reset fitur agar tidak looping
+            
+            // Jalankan ulang perintah asli setelah disetujui
+            if (asalFitur === 'all') {
+                msg.body = `/cek all ${barang.Nama} ${persen}%`;
+            } else {
+                msg.body = `/cek diskon ${barang.Nama} ${persen}%`;
+            }
+            return client.emit('message_create', msg);
+        } else if (isiPesan === 't') {
+            sessionPencarian[chatID] = {};
+            return await client.sendMessage(chatID, "❌ Proses dibatalkan karena melebihi plafon diskon.");
+        }
+    }
+
+    // --- LOGIKA MENUNGGU INPUT QTY UNTUK /CEK ALL ---
+    if (sessionPencarian[chatID] && sessionPencarian[chatID].fitur === 'menunggu_qty') {
+        if (/^\d+$/.test(isiPesan)) { 
+            const qtyButuh = parseInt(isiPesan);
+            const session = sessionPencarian[chatID];
+            const barang = session.selectedBarang;
+            const persen = session.diskon;
+
+            const totalStok = (barang.StokMTO || 0) + (barang.StokMTS || 0) + (barang.Stok2026 || 0);
+            let statusStok = "";
+
+            if (totalStok >= qtyButuh) {
+                statusStok = `Ready Stock (${totalStok} unit)`;
+            } else {
+                const leadtimeAngka = parseInt(String(barang.Leadtime).replace(/[^0-9]/g, '')) || 0;
+                const totalIndent = leadtimeAngka + 14;
+                statusStok = `Indent ${totalIndent} hari`;
+            }
+
+            const pot = (persen / 100) * barang.Harga;
+            const nettOriginal = barang.Harga - pot;
+            const nettBulat = Math.ceil(nettOriginal / 50) * 50; 
+            const formatRp = (n) => n.toLocaleString('id-ID');
+
+            const reply = `*${barang.Nama}* harga nett *Rp ${formatRp(nettBulat)} / exc PPN*, Franco Semarang, TPP ${statusStok}.`;
+            
+            sessionPencarian[chatID].fitur = null;
+            sessionPencarian[chatID].selectedBarang = null;
+
+            return await client.sendMessage(chatID, reply);
+        }
+    }
+
+    const updateMemory = (nama, diskon = null) => {
+        if (!sessionPencarian[chatID]) sessionPencarian[chatID] = {};
+        if (nama) sessionPencarian[chatID].lastSelected = nama;
+        if (diskon !== null) sessionPencarian[chatID].lastDiscount = diskon;
+    };
+
+    // --- LOGIKA CERDAS: PEMILIHAN DARI LIST ---
+    if (sessionPencarian[chatID] && sessionPencarian[chatID].data) {
+        const session = sessionPencarian[chatID];
+        const daftarBarang = session.data;
+        const isAngka = /^\d+$/.test(isiPesan);
+
+        let barangTerpilih = null;
+
+        if (isAngka) {
+            const index = parseInt(isiPesan) - 1;
+            if (daftarBarang[index]) barangTerpilih = daftarBarang[index];
+        } else {
+            const keywords = isiPesan.split(/\s+/); 
+            barangTerpilih = daftarBarang.find(b => {
+                const namaBarang = b.Nama.toLowerCase();
+                return keywords.every(k => namaBarang.includes(k));
+            });
+        }
+
+        if (barangTerpilih) {
+            updateMemory(barangTerpilih.Nama); 
+            const diskonFinal = session.diskon || session.lastDiscount || 0;
+
+            // Jika fitur ALL, langsung interupsi tanya Qty
+            if (session.fitur === 'all') {
+                sessionPencarian[chatID].fitur = 'menunggu_qty';
+                sessionPencarian[chatID].selectedBarang = barangTerpilih;
+                sessionPencarian[chatID].diskon = diskonFinal;
+                sessionPencarian[chatID].data = null; 
+
+                try {
+                    if (session.msgToDelete) await session.msgToDelete.delete(true);
+                    if (!msg.fromMe) await msg.delete(true); 
+                } catch (err) {}
+
+                return await client.sendMessage(chatID, `Berapa kebutuhan Qty untuk *${barangTerpilih.Nama}*?`);
+            }
+
+            let perintahBaru = "";
+            if (session.fitur === 'harga') perintahBaru = `/cek harga ${barangTerpilih.Nama}`;
+            else if (session.fitur === 'stock') perintahBaru = `/cek stock ${barangTerpilih.Nama}`;
+            else if (session.fitur === 'diskon') perintahBaru = `/cek diskon ${barangTerpilih.Nama} ${diskonFinal}`;
+
+            try {
+                if (session.msgToDelete) await session.msgToDelete.delete(true);
+                if (!msg.fromMe) await msg.delete(true); 
+            } catch (err) {}
+
+            msg.body = perintahBaru;
+            sessionPencarian[chatID].data = null; 
+            sessionPencarian[chatID].msgToDelete = null;
+            return client.emit('message_create', msg); 
+        }
+    }
+
+    if (msg.fromMe) {
+        const apakahPerintah = isiPesan.startsWith('/');
+        const adaDiList = sessionPencarian[chatID]?.data?.some(b => b.Nama.toLowerCase().includes(isiPesan));
+        if (!apakahPerintah && !adaDiList) return;
+    }
+
+    if (isiPesan === '/refresh') {
+        try {
+            const stats = require('fs').statSync('./database.xlsx');
+            return await client.sendMessage(chatID, `✅ Database Terdeteksi.\nTerakhir Update: ${stats.mtime}`);
+        } catch (e) {
+            return await client.sendMessage(chatID, `❌ File tidak ditemukan!`);
+        }
+    }
+
+    if (isiPesan === '/' || isiPesan === '/menu') {
+        const menuTeks = `🤖 *PHILIPS PRICE BOT*
+──────────────────
+Silakan pilih menu:
+
+1️⃣ *CEK HARGA (Pricelist)*
+Format: */cek harga [nama barang]*
+
+2️⃣ *HITUNG DISKON (Rincian)*
+Format: */cek diskon [nama barang] [diskon]*
+
+3️⃣ *CEK STOCK TPP (Rinci)*
+Format: */cek stock [nama]*
+
+4️⃣ *FORMAT PENAWARAN (Ready Copy)*
+Format: */cek all [nama] [diskon]*
+Contoh: _/cek all BVP171 30%_
+──────────────────`;
+        return await client.sendMessage(chatID, menuTeks);
+    }
+
+    // --- FITUR 4: CEK ALL (DENGAN VALIDASI DISKON) ---
+    if (isiPesan.startsWith('/cek all')) {
+        const input = msg.body.substring(8).trim(); 
+        let namaCari, persen;
+        const matchLengkap = msg.body.match(/\/cek all (.+) (\d+%|\d+)$/i);
+        const isOnlyPercent = /^(\d+%|\d+)$/.test(input);
+
+        if (matchLengkap) {
+            namaCari = matchLengkap[1].trim();
+            persen = parseFloat(matchLengkap[2].replace('%', ''));
+        } else if (isOnlyPercent && sessionPencarian[chatID]?.lastSelected) {
+            namaCari = sessionPencarian[chatID].lastSelected;
+            persen = parseFloat(input.replace('%', ''));
+        } else if (input === "" && sessionPencarian[chatID]?.lastSelected && sessionPencarian[chatID]?.lastDiscount) {
+            namaCari = sessionPencarian[chatID].lastSelected;
+            persen = sessionPencarian[chatID].lastDiscount;
+        } else if (input !== "" && !isOnlyPercent && sessionPencarian[chatID]?.lastDiscount) {
+            namaCari = input;
+            persen = sessionPencarian[chatID].lastDiscount;
+        }
+
+        if (namaCari && persen !== undefined) {
+            const hasil = cariDiExcel(namaCari, false);
+            if (hasil.length === 0) return await client.sendMessage(chatID, `❌ Barang "${namaCari}" tidak ditemukan.`);
+            
+            if (hasil.length > 1) {
+                let listPesan = `🔍 *Pilih tipe yang spesifik untuk "${namaCari}":*\n\n`;
+                hasil.forEach((b, i) => { listPesan += `${i + 1}. ${b.Nama}\n`; });
+                listPesan += `\n*Balas dengan nomor urut atau kata kunci spesifik.*`;
+                const msgList = await client.sendMessage(chatID, listPesan);
+                sessionPencarian[chatID] = { ...sessionPencarian[chatID], fitur: 'all', data: hasil, diskon: persen, msgToDelete: msgList };
+                return;
+            }
+
+            const barang = hasil[0];
+
+            // --- TAMBAHAN VALIDASI PLAFON DISKON ---
+            const diskonMax = getMaxDiskon(barang.Nama);
+            if (diskonMax > 0 && persen > diskonMax && sessionPencarian[chatID]?.fitur !== 'konfirmasi_diskon') {
+                sessionPencarian[chatID] = { fitur: 'konfirmasi_diskon', barang, persen, asalFitur: 'all' };
+                return await client.sendMessage(chatID, `⚠️ *PERINGATAN DISKON*\n\nBatas maksimal diskon untuk produk ini adalah *${diskonMax}%*.\n\nAnda memasukkan *${persen}%*. Tetap lanjut?\n*(Balas Y/T)*`);
+            }
+
+            updateMemory(barang.Nama, persen);
+
+            // Jika lolos validasi, lanjut tanya Qty
+            sessionPencarian[chatID].fitur = 'menunggu_qty';
+            sessionPencarian[chatID].selectedBarang = barang;
+            sessionPencarian[chatID].diskon = persen;
+
+            return await client.sendMessage(chatID, `Berapa kebutuhan Qty untuk *${barang.Nama}*?`);
+        } else {
+            return await client.sendMessage(chatID, "❌ Format salah atau memori kosong.\nContoh: */cek all BVP171 30%*");
+        }
+    }
+
+    // --- FITUR 3: CEK STOCK ---
+    if (isiPesan.startsWith('/cek stock')) {
+        let rawInput = msg.body.substring(10).trim();
+        const qtyMatch = rawInput.match(/(\d+)\s*pcs/i);
+        let minQty = 0;
+        let namaCari = rawInput;
+
+        if (qtyMatch) {
+            minQty = parseInt(qtyMatch[1]);
+            namaCari = rawInput.replace(qtyMatch[0], "").trim();
+        }
+
+        if (namaCari === "" && sessionPencarian[chatID]?.lastSelected) {
+            namaCari = sessionPencarian[chatID].lastSelected;
+        }
+
+        const hasil = cariDiExcel(namaCari, false, minQty); 
+
+        if (hasil.length === 0) {
+            const teksMin = minQty > 0 ? ` dengan stok ≥ ${minQty} unit` : "";
+            return await client.sendMessage(chatID, `❌ Barang "${namaCari}"${teksMin} tidak ditemukan.`);
+        }
+
+        if (hasil.length > 1) {
+            let listPesan = `📦 *Ditemukan beberapa tipe (Min. ${minQty} pcs):*\n\n`;
+            const limit = 50;
+            const dataTampil = hasil.slice(0, limit);
+
+            dataTampil.forEach((b, i) => { 
+                listPesan += `${i + 1}. ${b.Nama} *(Stok: ${b.TotalStok})*\n`; 
+            });
+
+            if (hasil.length > limit) listPesan += `\n*...dan ${hasil.length - limit} tipe lainnya.*`;
+            listPesan += `\n*Balas dengan nomor urut atau kata kunci spesifik.*`;
+            
+            const msgList = await client.sendMessage(chatID, listPesan);
+            sessionPencarian[chatID] = { ...sessionPencarian[chatID], fitur: 'stock', data: hasil, msgToDelete: msgList };
+            return;
+        }
+
+        const barang = hasil[0];
+        updateMemory(barang.Nama);
+        const reply = `📦 *LAPORAN STOK TERPADU*
+──────────────────
+🔍 *Produk:* ${barang.Nama}
+
+📊 *Rincian Stok:*
+• FREE STOCK MTO : *${barang.StokMTO}*
+• FREE STOCK MTS : *${barang.StokMTS}*
+• STOCK 2026     : *${barang.Stok2026}*
+
+📈 *TOTAL STOCK : ${barang.TotalStok} unit*
+🕒 *Leadtime:* ${barang.Leadtime}
+──────────────────`;
+        return await client.sendMessage(chatID, reply, { quotedMessageId: msg.id._serialized });
+    }
+
+    // --- FITUR 1: CEK HARGA ---
+    if (isiPesan.startsWith('/cek harga')) {
+        let namaCari = msg.body.substring(10).trim();
+        if (namaCari === "" && sessionPencarian[chatID]?.lastSelected) {
+            namaCari = sessionPencarian[chatID].lastSelected;
+        }
+        if (!namaCari) return await client.sendMessage(chatID, "❌ Sebutkan nama barang.");
+
+        const hasil = cariDiExcel(namaCari);
+        if (hasil.length === 0) return await client.sendMessage(chatID, `❌ Barang "${namaCari}" tidak ditemukan.`);
+        if (hasil.length > 1) {
+            let listPesan = `🔍 *Terdapat beberapa varian "${namaCari}":*\n\n`;
+            hasil.forEach((b, i) => { listPesan += `${i + 1}. ${b.Nama}\n`; });
+            listPesan += `\n*Balas dengan nomor urut atau kata kunci spesifik.*`;
+            const msgList = await client.sendMessage(chatID, listPesan);
+            sessionPencarian[chatID] = { ...sessionPencarian[chatID], fitur: 'harga', data: hasil, msgToDelete: msgList };
+            return;
+        }
+
+        const barang = hasil[0];
+        updateMemory(barang.Nama);
+        const formatRp = (n) => "Rp " + Math.round(n).toLocaleString('id-ID');
+        let labelStatus = barang.Status.toLowerCase().includes("phase") ? "\n⚠️ *STATUS: PHASE OUT*" : "";
+        const reply = `🔍 *DATA PRICELIST*
+──────────────────
+📦 *Produk:* ${barang.Nama}
+💰 *Price List:* *${formatRp(barang.Harga)}*
+🕒 *Leadtime:* ${barang.Leadtime} ${labelStatus}
+──────────────────
+_Ketik "/cek diskon [nama] [diskon]" untuk hitung nett._`;
+        return await client.sendMessage(chatID, reply, { quotedMessageId: msg.id._serialized });
+    }
+
+    // --- FITUR 2: CEK DISKON (VERSI VALIDASI) ---
+    if (isiPesan.startsWith('/cek diskon')) {
+        const input = msg.body.substring(11).trim();
+        let namaCari, persen;
+        const matchLengkap = msg.body.match(/\/cek diskon (.+) (\d+%|\d+)$/i);
+        const isOnlyPercent = /^(\d+%|\d+)$/.test(input);
+
+        if (matchLengkap) {
+            namaCari = matchLengkap[1].trim();
+            persen = parseFloat(matchLengkap[2].replace('%', ''));
+        } else if (isOnlyPercent && sessionPencarian[chatID]?.lastSelected) {
+            namaCari = sessionPencarian[chatID].lastSelected;
+            persen = parseFloat(input.replace('%', ''));
+        }
+
+        if (namaCari && persen !== undefined) {
+            const hasil = cariDiExcel(namaCari);
+            if (hasil.length === 0) return await client.sendMessage(chatID, `❌ Barang "${namaCari}" tidak ditemukan.`);
+            
+            if (hasil.length > 1) {
+                let listPesan = `🔍 *Pilih tipe untuk hitung diskon "${namaCari}":*\n\n`;
+                hasil.forEach((b, i) => { listPesan += `${i + 1}. ${b.Nama}\n`; });
+                listPesan += `\n*Balas dengan nomor urut atau kata kunci spesifik.*`;
+                const msgList = await client.sendMessage(chatID, listPesan);
+                sessionPencarian[chatID] = { ...sessionPencarian[chatID], fitur: 'diskon', data: hasil, diskon: persen, msgToDelete: msgList };
+                return;
+            }
+
+            const barang = hasil[0];
+
+            // --- LOGIKA VALIDASI PLAFON DISKON ---
+            const diskonMax = getMaxDiskon(barang.Nama);
+            if (diskonMax > 0 && persen > diskonMax && sessionPencarian[chatID]?.fitur !== 'konfirmasi_diskon') {
+                sessionPencarian[chatID] = { fitur: 'konfirmasi_diskon', barang, persen, asalFitur: 'diskon' };
+                return await client.sendMessage(chatID, `⚠️ *PERINGATAN DISKON*\n\nBatas maksimal diskon untuk produk ini adalah *${diskonMax}%*.\n\nAnda memasukkan *${persen}%*. Tetap lanjut?\n*(Balas Y/T)*`);
+            }
+
+            updateMemory(barang.Nama, persen);
+            const pot = (persen / 100) * barang.Harga;
+            const nettOriginal = barang.Harga - pot;
+            const nettBulat = Math.ceil(nettOriginal / 50) * 50;
+            const formatRp = (n) => "Rp " + Math.round(n).toLocaleString('id-ID');
+            let labelStatus = barang.Status.toLowerCase().includes("phase") ? "\n⚠️ *STATUS: PHASE OUT*" : "";
+            
+            const reply = `🔍 *HASIL HITUNG DISKON*
+──────────────────
+📦 *Produk:* ${barang.Nama}
+💰 *Price List:* ${formatRp(barang.Harga)}
+🏷️ *Diskon:* ${persen}%
+🕒 *Leadtime:* ${barang.Leadtime} ${labelStatus}
+──────────────────
+💵 *HARGA NETT:* ${formatRp(nettOriginal)}
+⚖️ *PEMBULATAN:* *${formatRp(nettBulat)}*`;
+            
+            return await client.sendMessage(chatID, reply, { quotedMessageId: msg.id._serialized });
+        }
+    }
+});
+
+const fs = require('fs');
+const path = require('path');
+
+async function startBot() {
+    const sessionLockPath = path.join(__dirname, '.wwebjs_auth/session/Default/SingletonLock');
+    
+    if (fs.existsSync(sessionLockPath)) {
+        try {
+            console.log('🔎 Menemukan file lock, mencoba membersihkan...');
+            fs.unlinkSync(sessionLockPath);
+            console.log('✅ Berhasil menghapus SingletonLock.');
+        } catch (err) {
+            console.log('⚠️ Gagal menghapus file lock secara otomatis.');
+            console.log('💡 Saran: Jalankan "taskkill /F /IM chrome.exe /T" di CMD.');
+        }
+    }
+
+    console.log('🚀 Menginisialisasi Client...');
+    await client.initialize();
+}
+
+startBot();
+
+client.initialize();
